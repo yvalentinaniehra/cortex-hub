@@ -1,7 +1,17 @@
 import type { Env } from './types.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-export const telemetryStorage = new AsyncLocalStorage<{ computeTokens: number; computeModel: string | null }>()
+export const telemetryStorage = new AsyncLocalStorage<{
+  computeTokens: number
+  computeModel: string | null
+}>()
+
+// Optional in-process adapter for the explicitly selected, offline local profile.
+// The standard Docker/HTTP entry points never set this and keep their behavior.
+let localApi: ((path: string, init?: RequestInit) => Promise<Response>) | undefined
+export function setLocalApi(adapter: typeof localApi): void {
+  localApi = adapter
+}
 
 /**
  * Make an API call to dashboard-api.
@@ -13,11 +23,8 @@ export const telemetryStorage = new AsyncLocalStorage<{ computeTokens: number; c
  * forwarded as X-API-Key-Owner header so dashboard-api can
  * use the authoritative identity from the API key.
  */
-export async function apiCall(
-  env: Env,
-  path: string,
-  init?: RequestInit
-): Promise<Response> {
+export async function apiCall(env: Env, path: string, init?: RequestInit): Promise<Response> {
+  if (localApi) return localApi(path, init)
   const baseUrl = env.DASHBOARD_API_URL || 'http://localhost:4000'
 
   // Merge X-API-Key-Owner header when identity is resolved
@@ -31,11 +38,11 @@ export async function apiCall(
     headers,
     signal: init?.signal ?? AbortSignal.timeout(120000), // Allow up to 2 minutes for slow LLM operations (e.g. gemma-4-31b-it thinking)
   })
-  
+
   // Extract compute telemetry headers if present
   const computeTokens = parseInt(response.headers.get('X-Cortex-Compute-Tokens') || '0', 10)
   const computeModel = response.headers.get('X-Cortex-Compute-Model')
-  
+
   const store = telemetryStorage.getStore()
   if (store && computeTokens > 0) {
     store.computeTokens += computeTokens
